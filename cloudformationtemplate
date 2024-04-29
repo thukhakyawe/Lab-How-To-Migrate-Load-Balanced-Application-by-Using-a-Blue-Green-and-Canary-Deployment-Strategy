@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: LODS - Use Elastic Load Balancing to Perform Blue/Green and Canary Application Updates.  Create VPC with Public and Private subnets, an IGW, an ALB with a target group for the two blue webservers.
+
+Parameters:
+  BlueGreenVPCCIDR:
+    Description:  The CIDR value for the new VPC to be created
+    Type: String
+    Default: 10.0.0.0/16
+    AllowedValues:
+      - 10.0.0.0/16
+      
+  PublicSubnet1Parameter:
+    Description:  The Public Subnet 1 CIDR
+    Type: String
+    Default: 10.0.1.0/24
+    AllowedValues:
+      - 10.0.1.0/24
+      
+  PublicSubnet2Parameter:
+    Description:  The Public Subnet 2 CIDR
+    Type: String
+    Default: 10.0.2.0/24
+    AllowedValues:
+      - 10.0.2.0/24
+      
+  PrivateSubnet1Parameter:
+    Description:  The Private Subnet 1 CIDR
+    Type: String
+    Default: 10.0.3.0/24
+    AllowedValues:
+      - 10.0.3.0/24
+      
+  PrivateSubnet2Parameter:
+    Description:  The Private Subnet 2 CIDR
+    Type: String
+    Default: 10.0.4.0/24
+    AllowedValues:
+      - 10.0.4.0/24
+      
+  LatestLinuxAmiId:
+    Description:  Fetches the latest Amazon Linux AMI ID from the Systems Manager Parameter store when creating the EC2 instance
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+  InstanceID:
+    Description: Instance ID passed from lab
+    Type: String
+    Default: Something
+    
+Resources:
+  BlueGreenVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref BlueGreenVPCCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value:  LODS-BlueGreen-VPC
+          
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      InternetGatewayId: !Ref InternetGateway
+      
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      CidrBlock: !Ref PublicSubnet1Parameter
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs
+      Tags:
+        - Key: Name
+          Value: Public Subnet 1
+          
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      CidrBlock: !Ref PublicSubnet2Parameter
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs
+      Tags:
+        - Key: Name
+          Value: Public Subnet 2
+          
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      Tags:
+      - Key: Name
+        Value: PublicRouteTable
+        
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      CidrBlock: !Ref PrivateSubnet1Parameter
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs
+      Tags:
+        - Key: Name
+          Value: Private Subnet 1
+          
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      CidrBlock: !Ref PrivateSubnet2Parameter
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs
+      Tags:
+        - Key: Name
+          Value: Private Subnet 2
+          
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BlueGreenVPC
+      Tags:
+      - Key: Name
+        Value: PrivateRouteTable
+        
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+      
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+      
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+      
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+      
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: BlueGreenALB-SG
+      GroupDescription: Allow HTTP traffic into ALB
+      VpcId: !Ref BlueGreenVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+      
+      
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Web-SG
+      GroupDescription: Security group for Web Servers
+      VpcId: !Ref BlueGreenVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+      
+      
+  BlueWebServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestLinuxAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds: 
+        - !Ref WebSecurityGroup
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Join [ "", [BlueWebServer1-, !Ref InstanceID] ]
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            sudo su
+            echo '<body> <p style="color:blue;"> You are connected to Blue WebServer 1</p> </body>' > /var/www/html/index.html
+          
+  BlueWebServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestLinuxAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds: 
+        - !Ref WebSecurityGroup
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Join [ "", [BlueWebServer2-, !Ref InstanceID] ]
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            sudo su
+            echo '<body> <p style="color:blue;"> You are connected to Blue WebServer 2</p> </body>' > /var/www/html/index.html
+            
+  GreenWebServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestLinuxAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds: 
+        - !Ref WebSecurityGroup
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Join [ "", [GreenWebServer1-, !Ref InstanceID] ]
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            sudo su
+            echo '<body> <p style="color:green;"> You are connected to Green WebServer 1</p> </body>' > /var/www/html/index.html
+          
+  GreenWebServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestLinuxAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds: 
+        - !Ref WebSecurityGroup
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Join [ "", [GreenWebServer2-, !Ref InstanceID] ]
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            sudo su
+            echo '<body> <p style="color:green;"> You are connected to Green WebServer 2</p> </body>' > /var/www/html/index.html
+  
+  BlueGreenALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      IpAddressType: ipv4
+      Name: BlueGreenALB
+      Scheme: internet-facing
+      SecurityGroups: 
+        - !Ref ALBSecurityGroup
+      Subnets: 
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Type: application
+    
+  BlueGreenALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: 
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100            
+      LoadBalancerArn: !Ref BlueGreenALB
+      Port: 80
+      Protocol: HTTP
+    
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      Name: Blue
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref BlueGreenVPC
+
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      Name: Green
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref BlueGreenVPC
